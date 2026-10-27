@@ -1,12 +1,19 @@
 import json
 import logging
 from datetime import date
+from typing import get_args
 
 import pytest
 from fakes import FakeLLM
 
-from claim_extractor.extractor import ExtractionError, extract_claim
+from claim_extractor.extractor import (
+    FEW_SHOT_EXAMPLES,
+    ExtractionError,
+    build_date_hints,
+    extract_claim,
+)
 from claim_extractor.llm.base import LLMError
+from claim_extractor.models import RequestType
 
 CLAIM = "Mon pass Navigo a été débité deux fois le 3 octobre, 86,40 €, je veux être remboursé"
 TODAY = date(2025, 10, 20)
@@ -33,16 +40,34 @@ def test_valid_first_reply_needs_a_single_call() -> None:
     assert len(llm.calls) == 1
 
 
-def test_prompt_contains_schema_date_and_claim() -> None:
+def test_prompt_has_schema_dates_examples_then_the_claim() -> None:
     llm = FakeLLM([VALID_REPLY])
 
     extract_claim(CLAIM, llm, today=TODAY)
 
-    system, user = llm.calls[0]
+    system, *examples, user = llm.calls[0]
     assert system["role"] == "system"
-    assert "2025-10-20" in system["content"]
+    assert "lundi 2025-10-20" in system["content"]  # TODAY, in the date hints
     assert '"additionalProperties": false' in system["content"]  # the JSON schema
+    assert [message["role"] for message in examples] == ["user", "assistant"] * len(
+        FEW_SHOT_EXAMPLES
+    )
     assert user == {"role": "user", "content": CLAIM}
+
+
+def test_date_hints_resolve_relative_dates() -> None:
+    hints = build_date_hints(date(2026, 10, 19))  # a Monday
+
+    assert "- hier : dimanche 2026-10-18" in hints
+    assert "- jeudi dernier : 2026-10-15" in hints
+    assert "- lundi dernier : 2026-10-12" in hints  # a week ago, not today
+    assert "en 2026 si elle tombe au plus tard aujourd'hui, sinon en 2025" in hints
+
+
+def test_few_shot_examples_cover_every_category() -> None:
+    categories = {example.type_demande for _, example in FEW_SHOT_EXAMPLES}
+
+    assert categories == set(get_args(RequestType))
 
 
 @pytest.mark.parametrize(

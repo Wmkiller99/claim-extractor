@@ -15,6 +15,7 @@ from claim_extractor.evaluation import (
     run_evaluation,
     summarize,
 )
+from claim_extractor.extractor import FEW_SHOT_EXAMPLES
 from claim_extractor.models import ClaimExtraction, RequestType, Urgency
 
 EVAL_SET = Path(__file__).parents[1] / "data" / "eval_set.jsonl"
@@ -55,6 +56,12 @@ def test_eval_set_is_valid_and_covers_every_category() -> None:
         case.expected.date_incident is None or case.expected.date_incident <= case.received_on
         for case in cases
     )
+
+
+def test_few_shot_examples_are_not_taken_from_the_eval_set() -> None:
+    eval_texts = {case.text for case in load_cases(EVAL_SET)}
+
+    assert not eval_texts & {text for text, _ in FEW_SHOT_EXAMPLES}
 
 
 def test_load_cases_points_at_the_faulty_line(tmp_path: Path) -> None:

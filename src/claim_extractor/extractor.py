@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import ValidationError
@@ -15,26 +15,100 @@ logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 2  # first try + one retry with the validation errors
 
+WEEKDAYS = ("lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche")
+
 SYSTEM_PROMPT = """\
-Tu analyses des réclamations envoyées par des clients à un service client.
+Tu analyses des réclamations envoyées par des clients à un service client de transport.
 Réponds uniquement avec un objet JSON conforme à ce schéma :
 {schema}
 
-Règles :
-- type_demande : "remboursement" si le client demande à être remboursé ou dédommagé ;
-  "perte" s'il a perdu un objet ; "information" pour une simple question ;
-  "reclamation_service" pour une plainte sur le service (retard, accueil, propreté)
-  sans demande de remboursement ; "autre" sinon.
-- montant : montant en euros cité dans la réclamation (avec un point décimal), sinon null.
-  Si plusieurs montants sont cités, prends celui que le client réclame.
-- date_incident : date de l'incident au format AAAA-MM-JJ, sinon null.
-  Nous sommes le {today} : si l'année manque, prends la date passée la plus proche.
-- urgence : "haute" si le client est bloqué, en danger, ou a perdu des papiers ou un moyen
-  de paiement ; "moyenne" pour un préjudice financier ou un service dégradé ;
-  "faible" dans les autres cas (question, gêne mineure, remerciements...).
-- resume : une seule phrase en français.
-- confiance : ta certitude sur l'ensemble de l'extraction, entre 0 et 1.
+type_demande : applique la première règle qui correspond.
+1. "perte" : le client a perdu ou oublié un objet, même s'il pose une question ou demande
+   un remplacement.
+2. "remboursement" : le client demande à être remboursé ou dédommagé.
+3. "information" : le client pose une question, sans se plaindre.
+4. "reclamation_service" : le client se plaint du service (retard, panne, accueil, sécurité,
+   propreté) sans demander de remboursement.
+5. "autre" : tout le reste (félicitations, suggestion, données personnelles...).
+
+urgence :
+- "haute" seulement si le client est bloqué (ne peut plus voyager ou travailler), en danger,
+  ou a perdu des papiers d'identité ou un moyen de paiement. Un ton pressant ne suffit pas.
+- "moyenne" pour une perte d'argent ou un service dégradé (débit, amende, retard, panne).
+- "faible" dans les autres cas (question, objet sans valeur, gêne mineure, remerciements...).
+
+montant : montant en euros cité dans la réclamation, en chiffres avec un point décimal
+(« quinze euros » donne 15.0), sinon null. Si plusieurs montants sont cités, prends celui
+que le client réclame.
+
+date_incident : jour de l'incident au format AAAA-MM-JJ. Utilise ces repères :
+{date_hints}
+Mets null si aucun jour précis n'est donné (« depuis juillet ») ou si la date est future.
+
+resume : une seule phrase en français.
+confiance : ta certitude sur l'ensemble de l'extraction, entre 0 et 1.
 """
+
+# Worked examples sent before the claim, one per category. They are deliberately NOT taken
+# from the evaluation set; building them as ClaimExtraction validates them at import time.
+FEW_SHOT_EXAMPLES: list[tuple[str, ClaimExtraction]] = [
+    (
+        "J'ai oublié mon écharpe grise dans le bus 27. Est-ce que quelqu'un l'a rapportée ?",
+        ClaimExtraction(
+            type_demande="perte",
+            montant=None,
+            date_incident=None,
+            urgence="faible",
+            resume="Le client a oublié son écharpe dans le bus 27 et demande si on l'a retrouvée.",
+            confiance=0.9,
+        ),
+    ),
+    (
+        "Le 5 mars 2026, l'automate m'a facturé quinze euros mais le ticket n'est jamais sorti. "
+        "Je veux être remboursé.",
+        ClaimExtraction(
+            type_demande="remboursement",
+            montant=15.0,
+            date_incident=date(2026, 3, 5),
+            urgence="moyenne",
+            resume="Le client a payé 15 € pour un ticket non délivré et demande un remboursement.",
+            confiance=0.95,
+        ),
+    ),
+    (
+        "Les vélos sont-ils autorisés dans le tramway le dimanche ?",
+        ClaimExtraction(
+            type_demande="information",
+            montant=None,
+            date_incident=None,
+            urgence="faible",
+            resume="Le client demande si les vélos sont autorisés dans le tramway le dimanche.",
+            confiance=0.95,
+        ),
+    ),
+    (
+        "Ma carte Navigo ne passe plus aux portiques et je ne peux plus aller travailler !",
+        ClaimExtraction(
+            type_demande="reclamation_service",
+            montant=None,
+            date_incident=None,
+            urgence="haute",
+            resume="La carte Navigo du client ne passe plus, il ne peut plus aller travailler.",
+            confiance=0.85,
+        ),
+    ),
+    (
+        "Je propose d'installer des prises USB dans les rames, ce serait bien pratique.",
+        ClaimExtraction(
+            type_demande="autre",
+            montant=None,
+            date_incident=None,
+            urgence="faible",
+            resume="Le client suggère d'installer des prises USB dans les rames.",
+            confiance=0.9,
+        ),
+    ),
+]
 
 RETRY_PROMPT = """\
 Ta réponse précédente n'est pas valide :
@@ -65,12 +139,13 @@ def extract_claim(text: str, client: LLMClient, *, today: date | None = None) ->
     schema = ClaimExtraction.model_json_schema()
     system_prompt = SYSTEM_PROMPT.format(
         schema=json.dumps(schema, ensure_ascii=False),
-        today=(today or date.today()).isoformat(),
+        date_hints=build_date_hints(today or date.today()),
     )
-    messages: list[Message] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text},
-    ]
+    messages: list[Message] = [{"role": "system", "content": system_prompt}]
+    for example_text, example_output in FEW_SHOT_EXAMPLES:
+        messages.append({"role": "user", "content": example_text})
+        messages.append({"role": "assistant", "content": example_output.model_dump_json()})
+    messages.append({"role": "user", "content": text})
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         start = time.perf_counter()
@@ -101,6 +176,27 @@ def extract_claim(text: str, client: LLMClient, *, today: date | None = None) ->
             return claim
 
     raise AssertionError("unreachable: the last attempt always returns or raises")
+
+
+def build_date_hints(today: date) -> str:
+    """A small pre-computed calendar: the model looks dates up instead of computing them."""
+    lines = [
+        f"- aujourd'hui (ce matin, ce soir) : {_day_label(today)}",
+        f"- hier : {_day_label(today - timedelta(days=1))}",
+        f"- avant-hier : {_day_label(today - timedelta(days=2))}",
+    ]
+    for weekday, name in enumerate(WEEKDAYS):
+        days_back = (today.weekday() - weekday) % 7 or 7  # "lundi dernier" on a Monday: 7 days
+        lines.append(f"- {name} dernier : {(today - timedelta(days=days_back)).isoformat()}")
+    lines.append(
+        f"- une date sans année est en {today.year} si elle tombe au plus tard aujourd'hui, "
+        f"sinon en {today.year - 1}"
+    )
+    return "\n".join(lines)
+
+
+def _day_label(day: date) -> str:
+    return f"{WEEKDAYS[day.weekday()]} {day.isoformat()}"
 
 
 def _log_attempt(
