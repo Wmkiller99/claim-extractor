@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27,<1",
+    "pandas>=2.2,<4",
     "pydantic>=2.7,<3",
     "pydantic-settings>=2.3,<3",
+    "streamlit>=1.43,<2",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +21,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.11",
+    "pandas-stubs",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -40,7 +43,7 @@ select = [
 
 [tool.mypy]
 strict = true
-files = ["src", "tests", "evaluate.py"]
+files = ["src", "tests", "evaluate.py", "app.py"]
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
