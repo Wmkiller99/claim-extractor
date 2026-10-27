@@ -40,7 +40,7 @@ select = [
 
 [tool.mypy]
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "evaluate.py"]
 plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]

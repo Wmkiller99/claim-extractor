@@ -1,12 +1,12 @@
 import json
 import logging
 from datetime import date
-from typing import Any
 
 import pytest
+from fakes import FakeLLM
 
 from claim_extractor.extractor import ExtractionError, extract_claim
-from claim_extractor.llm.base import LLMClient, LLMError, Message
+from claim_extractor.llm.base import LLMError
 
 CLAIM = "Mon pass Navigo a été débité deux fois le 3 octobre, 86,40 €, je veux être remboursé"
 TODAY = date(2025, 10, 20)
@@ -21,22 +21,6 @@ VALID_REPLY = json.dumps(
     }
 )
 INVALID_REPLY = VALID_REPLY.replace('"remboursement"', '"plainte"')
-
-
-class FakeLLM(LLMClient):
-    """Replays scripted replies and records every conversation it receives."""
-
-    def __init__(self, replies: list[str | Exception]) -> None:
-        super().__init__(model="fake-model")
-        self.replies = replies
-        self.calls: list[list[Message]] = []
-
-    def complete(self, messages: list[Message], json_schema: dict[str, Any]) -> str:
-        self.calls.append(list(messages))  # copy: what was sent must not change afterwards
-        reply = self.replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
 
 
 def test_valid_first_reply_needs_a_single_call() -> None:

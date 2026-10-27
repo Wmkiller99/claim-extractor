@@ -26,11 +26,12 @@ Règles :
   "reclamation_service" pour une plainte sur le service (retard, accueil, propreté)
   sans demande de remboursement ; "autre" sinon.
 - montant : montant en euros cité dans la réclamation (avec un point décimal), sinon null.
+  Si plusieurs montants sont cités, prends celui que le client réclame.
 - date_incident : date de l'incident au format AAAA-MM-JJ, sinon null.
   Nous sommes le {today} : si l'année manque, prends la date passée la plus proche.
 - urgence : "haute" si le client est bloqué, en danger, ou a perdu des papiers ou un moyen
   de paiement ; "moyenne" pour un préjudice financier ou un service dégradé ;
-  "faible" pour une question ou une gêne mineure.
+  "faible" dans les autres cas (question, gêne mineure, remerciements...).
 - resume : une seule phrase en français.
 - confiance : ta certitude sur l'ensemble de l'extraction, entre 0 et 1.
 """
