@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     llm_provider: Literal["ollama", "mistral"] = "ollama"
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen2.5:3b"
     mistral_api_key: SecretStr | None = None  # SecretStr: shown as '**********' if printed
     mistral_model: str = "mistral-small-latest"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

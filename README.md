@@ -65,7 +65,7 @@ backend to constrain generation. Changing the model changes the contract everywh
 Unknown keys are rejected (`extra="forbid"`), and amounts, confidence and summary length are
 bounded.
 
-**Defence in depth.** Temperature 0 for repeatable answers, schema-constrained decoding on both
+**Defence in depth.** Temperature 0 for the most stable answers, schema-constrained decoding on both
 backends, then Pydantic validation anyway: constrained decoding guarantees the structure, not
 every rule (bounds, real dates, allowed values on every backend version).
 
@@ -84,11 +84,10 @@ variables and a git-ignored `.env`. The API key is a `SecretStr` (masked when pr
 placed in the `Authorization` header, and never included in error messages, which tests check.
 
 **Observable.** Each LLM call writes one `key=value` log line with the model, attempt, duration
-and outcome (durations below are illustrative):
+and outcome (`success` at INFO level, `invalid_output` or `llm_error` at WARNING):
 
 ```
-WARNING claim_extractor.extractor llm_call model=qwen2.5:7b attempt=1 duration_ms=2310 outcome=invalid_output
-INFO    claim_extractor.extractor llm_call model=qwen2.5:7b attempt=2 duration_ms=2154 outcome=success
+INFO claim_extractor.extractor llm_call model=qwen2.5:3b attempt=1 duration_ms=1526 outcome=success
 ```
 
 The package never configures logging itself; the entry points (`app.py`, `evaluate.py`) do.
@@ -119,19 +118,39 @@ How it is scored:
 
 ### Results
 
-> **TODO:** run `python evaluate.py` with each backend and replace the dashes below.
+`qwen2.5:3b` through Ollama 0.40.11 on a laptop (Ryzen 7 4800H, GeForce GTX 1660 Ti), five runs
+of `python evaluate.py`:
 
-| Metric | qwen2.5:7b (Ollama) | mistral-small-latest (API) |
+| Metric | qwen2.5:3b (Ollama), 5 runs | mistral-small-latest (API) |
 |---|---|---|
-| Valid JSON | – | – |
-| `type_demande` | – | – |
-| `montant` | – | – |
-| `date_incident` | – | – |
-| `urgence` | – | – |
-| Mean duration per claim | – | – |
+| Valid JSON | 100% | not run yet |
+| `type_demande` | 65–70% | not run yet |
+| `montant` | 95% | not run yet |
+| `date_incident` | 55–60% | not run yet |
+| `urgence` | 35–40% | not run yet |
+| Mean duration per claim | 1.7 s (model loaded; the first call, which loads it, took 9.6 s) | not run yet |
 
-`evaluate.py` also lists every mismatch (`c14  montant  expected=345.6  got=86.4`), which is what
-drives prompt changes.
+What the mismatches show (`evaluate.py` lists every one of them):
+
+- **The format is solved, the meaning is not.** Every output was valid JSON, and in the logged
+  run all 20 calls passed validation on the first attempt: with schema-constrained decoding the
+  retry never fired. All the errors are about meaning.
+- **One default category.** Every `type_demande` error is `reclamation_service`: three of the
+  four lost-item claims (the fourth too in one run), the compliment, the data-deletion request
+  and a question.
+- **Urgency is overestimated.** Of the 12 urgency errors seen in every run, 10 answer `haute`.
+- **Dates are the weakest point of a 3B model.** It invents years ("le 18 octobre" becomes
+  2018-10-18 although the prompt gives today's date), miscomputes relative dates ("jeudi
+  dernier" lands in April) and makes up a date when there is none ("depuis juillet", a question
+  about a future day).
+- **The only amount error is debatable**: c15 quotes a price in a question, and the label says to
+  report it.
+- **Temperature 0 is not bit-for-bit deterministic.** Runs 2 to 5 were identical, but the first
+  one differed on 3 of the 80 field checks.
+
+Next steps these results point to: a larger model (`qwen2.5:7b`, Mistral), relative dates
+computed in code instead of by the model, and a few examples in the prompt for `perte`, `autre`
+and the urgency levels.
 
 ## Getting started
 
@@ -147,7 +166,8 @@ cp .env.example .env
 Then choose a backend in `.env`:
 
 - **Ollama (local, free):** install [Ollama](https://ollama.com) (0.5 or later, for structured
-  outputs), then `ollama pull qwen2.5:7b`. Keep `LLM_PROVIDER=ollama`.
+  outputs), then `ollama pull qwen2.5:3b`. Keep `LLM_PROVIDER=ollama`. With more memory and
+  disk, `qwen2.5:7b` (set `OLLAMA_MODEL`) is more accurate.
 - **Mistral API:** set `LLM_PROVIDER=mistral` and `MISTRAL_API_KEY=...`.
 
 Run the interface (paste a claim, or upload a CSV and download the result):
@@ -192,6 +212,8 @@ tests/                     pytest suite: fake LLM, mocked HTTP, headless app
 - **Small evaluation set, one annotator.** 20 claims give a rough signal, not a precise score.
   The same person wrote the labels and the prompt rules, so the prompt may fit this set better
   than real traffic.
+- **Not bit-for-bit reproducible.** Even at temperature 0, a local model can change a few answers
+  from one run to the next (3 of 80 field checks here), so one run is not a precise score.
 - **Self-reported confidence.** `confiance` is the model's own estimate and is not calibrated.
 - **Money as `float`.** Fine for display and comparison to the cent; `Decimal` would be the
   rigorous type for accounting.
@@ -205,6 +227,9 @@ tests/                     pytest suite: fake LLM, mocked HTTP, headless app
 
 ## Possible improvements
 
+- Resolve relative dates ("hier", "jeudi dernier") in code from the reception date, and let the
+  model only extract the expression.
+- A few examples in the prompt for the weakest categories (`perte`, `autre`, urgency levels).
 - A larger evaluation set labelled by two people, with their agreement measured.
 - Measure validity on the first attempt as well, to quantify what the retry brings.
 - Retry with exponential backoff for transient HTTP errors (429, 503, timeouts).
