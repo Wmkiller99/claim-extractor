@@ -119,38 +119,56 @@ How it is scored:
 ### Results
 
 `qwen2.5:3b` through Ollama 0.40.11 on a laptop (Ryzen 7 4800H, GeForce GTX 1660 Ti), five runs
-of `python evaluate.py`:
+of `python evaluate.py` for each version of the prompt. Prompt v2 was written after reading the
+v1 mismatches.
 
-| Metric | qwen2.5:3b (Ollama), 5 runs | mistral-small-latest (API) |
+| Metric | Prompt v1 | Prompt v2 |
 |---|---|---|
-| Valid JSON | 100% | not run yet |
-| `type_demande` | 65–70% | not run yet |
-| `montant` | 95% | not run yet |
-| `date_incident` | 55–60% | not run yet |
-| `urgence` | 35–40% | not run yet |
-| Mean duration per claim | 1.7 s (model loaded; the first call, which loads it, took 9.6 s) | not run yet |
+| Valid JSON | 100% | 100% |
+| Valid on the first attempt (from the logs) | 20 of 20 calls (1 logged run) | 100 of 100 calls |
+| `type_demande` | 65–70% | 85% |
+| `montant` | 95% | 95% |
+| `date_incident` | 55–60% | 85% |
+| `urgence` | 35–40% | 85% |
+| Field errors per run (out of 80) | 28–29 | 10 |
+| Mean duration per claim | 1.6–1.7 s | 2.6–3.5 s |
+| Identical runs | 4 of 5 | 5 of 5 |
 
-What the mismatches show (`evaluate.py` lists every one of them):
+Mistral (`mistral-small-latest`) has not been evaluated yet.
 
-- **The format is solved, the meaning is not.** Every output was valid JSON, and in the logged
-  run all 20 calls passed validation on the first attempt: with schema-constrained decoding the
-  retry never fired. All the errors are about meaning.
-- **One default category.** Every `type_demande` error is `reclamation_service`: three of the
-  four lost-item claims (the fourth too in one run), the compliment, the data-deletion request
-  and a question.
-- **Urgency is overestimated.** Of the 12 urgency errors seen in every run, 10 answer `haute`.
-- **Dates are the weakest point of a 3B model.** It invents years ("le 18 octobre" becomes
-  2018-10-18 although the prompt gives today's date), miscomputes relative dates ("jeudi
-  dernier" lands in April) and makes up a date when there is none ("depuis juillet", a question
-  about a future day).
-- **The only amount error is debatable**: c15 quotes a price in a question, and the label says to
-  report it.
-- **Temperature 0 is not bit-for-bit deterministic.** Runs 2 to 5 were identical, but the first
-  one differed on 3 of the 80 field checks.
+**What v1 got wrong.** The format was never the problem: every output was valid JSON, and no
+logged call needed the retry. All the errors were about meaning, with clear biases:
+`reclamation_service` as the default category (every `type_demande` error, including three of the
+four lost items), urgency overestimated (10 of the 12 stable urgency errors answered `haute`), and
+dates: invented years ("le 18 octobre" became 2018-10-18), miscomputed relative dates ("jeudi
+dernier" landed in April), dates made up when there was none.
 
-Next steps these results point to: a larger model (`qwen2.5:7b`, Mistral), relative dates
-computed in code instead of by the model, and a few examples in the prompt for `perte`, `autre`
-and the urgency levels.
+**What v2 changed**, one fix per bias:
+
+- Category rules numbered and applied in order, `perte` first.
+- `haute` restricted to a blocked client, danger, or lost ID or means of payment; "a pressing tone
+  is not enough".
+- Dates looked up instead of computed: the code builds a small calendar (today, yesterday, "jeudi
+  dernier"..., which year to use) and puts it in the prompt.
+- Five worked examples, one per category, written for the prompt and not taken from the
+  evaluation set (a test checks it).
+
+**What remains** (10 errors, the same in every run):
+
+- c08, a *lost* Navigo card, is still `reclamation_service` while the other three lost items are
+  now right. It closely resembles the example of a Navigo card that *no longer works*
+  (`reclamation_service`), which most likely pulls it the wrong way.
+- `autre` is still hard: a compliment becomes `reclamation_service`, a data-deletion request
+  becomes `remboursement`.
+- Dates: the year rule is not always applied (c16 gives 2026-12-28, a future date), "depuis
+  juillet" still becomes 2026-07-01, and "hier soir" is now one day off (c02), a regression.
+- Urgency: three disagreements, at least two of them on debatable labels (a missed job interview
+  rated `haute`, loud announcements rated `moyenne`).
+- The amount quoted in a question (c15) is still left out.
+
+**How far to trust this.** v2 was tuned by looking at these same 20 claims, so 85% is an
+optimistic estimate of the real gain: a held-out set is needed to measure it properly. The longer
+prompt also costs 60 to 70% more time per claim.
 
 ## Getting started
 
@@ -210,10 +228,11 @@ tests/                     pytest suite: fake LLM, mocked HTTP, headless app
 ## Limitations
 
 - **Small evaluation set, one annotator.** 20 claims give a rough signal, not a precise score.
-  The same person wrote the labels and the prompt rules, so the prompt may fit this set better
-  than real traffic.
+  The same person wrote the labels and the prompt rules, and prompt v2 was tuned on this set, so
+  the prompt fits it better than it would fit real traffic.
 - **Not bit-for-bit reproducible.** Even at temperature 0, a local model can change a few answers
-  from one run to the next (3 of 80 field checks here), so one run is not a precise score.
+  from one run to the next (with prompt v1, one run of five differed on 3 of 80 field checks), so
+  one run is not a precise score.
 - **Self-reported confidence.** `confiance` is the model's own estimate and is not calibrated.
 - **Money as `float`.** Fine for display and comparison to the cent; `Decimal` would be the
   rigorous type for accounting.
@@ -227,9 +246,11 @@ tests/                     pytest suite: fake LLM, mocked HTTP, headless app
 
 ## Possible improvements
 
-- Resolve relative dates ("hier", "jeudi dernier") in code from the reception date, and let the
-  model only extract the expression.
-- A few examples in the prompt for the weakest categories (`perte`, `autre`, urgency levels).
+- A held-out evaluation set, never read while tuning the prompt, to measure prompt changes
+  without overfitting.
+- Resolve dates entirely in code: let the model extract the expression ("hier soir", "le 28
+  décembre") and convert it deterministically from the reception date.
+- Few-shot examples chosen so that none closely resembles a claim of another category.
 - A larger evaluation set labelled by two people, with their agreement measured.
 - Measure validity on the first attempt as well, to quantify what the retry brings.
 - Retry with exponential backoff for transient HTTP errors (429, 503, timeouts).
